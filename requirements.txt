@@ -1,0 +1,28 @@
+# Face Security System - Working Package Versions
+# These specific versions are confirmed to work together
+
+# Core dependencies
+numpy==1.24.3
+opencv-python==4.8.1.78
+opencv-contrib-python==4.8.1.78
+face-recognition==1.3.0
+face-recognition-models>=0.3.0
+
+# MediaPipe (optional - fallback will be used if incompatible)
+mediapipe==0.10.5
+protobuf==3.19.6
+
+# GUI and Security
+cryptography>=3.4.8
+keyboard>=1.13.0
+
+# Windows-specific (for screen overlay)
+pywin32>=227
+
+# Image processing
+Pillow>=8.2.0
+scikit-learn>=1.0.0
+
+# Note: If you encounter MediaPipe compatibility issues,
+# the system will automatically fall back to face_recognition library.
+# Both systems provide identical functionality.
