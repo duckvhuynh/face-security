@@ -36,16 +36,7 @@ class Config:
         }
         
         self.config['Security_Messages'] = {
-            'LOCK_MESSAGE': '''🔒 UNAUTHORIZED ACCESS DETECTED 🔒
-
-SCREEN LOCKED FOR SECURITY
-
-This computer is protected by facial recognition security.
-Only the registered owner can unlock this screen.
-
-Press Ctrl+Alt+O to enter unlock password
-
-⚠️ All access attempts are being logged ⚠️''',
+            'LOCK_MESSAGE': '''a''',
             'UNLOCK_HOTKEY': 'ctrl+alt+o'
         }
         
@@ -183,6 +174,23 @@ Press Ctrl+Alt+O to enter unlock password
     @property
     def detection_interval(self):
         return self.get_float('Performance', 'DETECTION_INTERVAL')
+    
+    # Blur effect properties
+    @property
+    def enable_screen_blur(self):
+        return self.get_bool('Blur_Effect', 'ENABLE_SCREEN_BLUR')
+    
+    @property
+    def blur_intensity(self):
+        return self.get_int('Blur_Effect', 'BLUR_INTENSITY')
+    
+    @property
+    def blur_quality_reduction(self):
+        return self.get_int('Blur_Effect', 'BLUR_QUALITY_REDUCTION')
+    
+    @property
+    def blur_overlay_darkness(self):
+        return self.get_int('Blur_Effect', 'BLUR_OVERLAY_DARKNESS')
 
 # Global config instance
 config = Config()

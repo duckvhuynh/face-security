@@ -320,8 +320,94 @@ class MediaPipeFaceSecuritySystem:
         user32 = windll.user32
         return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
     
+    def capture_screen(self):
+        """Capture the current screen content"""
+        try:
+            # Get screen dimensions
+            screen_width, screen_height = self.get_screen_size()
+            
+            # Create device context
+            hwindc = win32gui.GetWindowDC(0)
+            srcdc = win32ui.CreateDCFromHandle(hwindc)
+            memdc = srcdc.CreateCompatibleDC()
+            
+            # Create bitmap
+            bmp = win32ui.CreateBitmap()
+            bmp.CreateCompatibleBitmap(srcdc, screen_width, screen_height)
+            memdc.SelectObject(bmp)
+            
+            # Copy screen to bitmap
+            memdc.BitBlt((0, 0), (screen_width, screen_height), srcdc, (0, 0), win32con.SRCCOPY)
+            
+            # Convert to PIL Image
+            bmpinfo = bmp.GetInfo()
+            bmpstr = bmp.GetBitmapBits(True)
+            
+            # Create PIL image from bitmap data
+            img = Image.frombuffer(
+                'RGB',
+                (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+                bmpstr, 'raw', 'BGRX', 0, 1)
+            
+            # Clean up
+            srcdc.DeleteDC()
+            memdc.DeleteDC()
+            win32gui.ReleaseDC(0, hwindc)
+            win32gui.DeleteObject(bmp.GetHandle())
+            
+            return img
+            
+        except Exception as e:
+            print(f"Error capturing screen: {e}")
+            return None
+    
+    def create_blurred_background(self):
+        """Create a blurred version of the current screen"""
+        try:
+            # Check if blur is enabled
+            if CONFIG_AVAILABLE and not config.enable_screen_blur:
+                return None
+                
+            # Capture current screen
+            screen_image = self.capture_screen()
+            if screen_image is None:
+                return None
+            
+            # Get configuration values
+            if CONFIG_AVAILABLE:
+                blur_intensity = config.blur_intensity
+                quality_reduction = config.blur_quality_reduction
+                overlay_darkness = config.blur_overlay_darkness
+            else:
+                blur_intensity = 15
+                quality_reduction = 4
+                overlay_darkness = 100
+            
+            # Apply blur effect
+            # Reduce size for performance, then upscale
+            small_size = (screen_image.width // quality_reduction, screen_image.height // quality_reduction)
+            screen_image_small = screen_image.resize(small_size, Image.Resampling.LANCZOS)
+            
+            # Apply multiple blur passes for stronger effect
+            blurred = screen_image_small.filter(ImageFilter.GaussianBlur(radius=blur_intensity))
+            blurred = blurred.filter(ImageFilter.GaussianBlur(radius=blur_intensity//2))
+            
+            # Scale back to full size
+            blurred_full = blurred.resize(screen_image.size, Image.Resampling.LANCZOS)
+            
+            # Add darkening overlay for better text readability
+            overlay = Image.new('RGBA', blurred_full.size, (0, 0, 0, overlay_darkness))  # Semi-transparent black
+            blurred_full = blurred_full.convert('RGBA')
+            blurred_full = Image.alpha_composite(blurred_full, overlay)
+            
+            return blurred_full.convert('RGB')
+            
+        except Exception as e:
+            print(f"Error creating blurred background: {e}")
+            return None
+
     def create_blur_overlay(self):
-        """Create a blurred overlay window"""
+        """Create a modern blurred overlay window with text"""
         if self.blur_window:
             return
         
@@ -330,38 +416,88 @@ class MediaPipeFaceSecuritySystem:
         # Create fullscreen window
         self.blur_window = tk.Toplevel()
         self.blur_window.title("Screen Security")
-        self.blur_window.configure(bg='black')
         self.blur_window.attributes('-fullscreen', True)
         self.blur_window.attributes('-topmost', True)
         self.blur_window.attributes('-toolwindow', True)
+        self.blur_window.configure(bg='#000000')
         
-        # Create blur effect with warning
+        try:
+            # Create blurred background
+            print("Capturing and blurring screen...")
+            blurred_bg = self.create_blurred_background()
+            
+            if blurred_bg:
+                # Convert PIL image to PhotoImage for tkinter
+                photo = ImageTk.PhotoImage(blurred_bg)
+                
+                # Create background label with blurred image
+                bg_label = tk.Label(self.blur_window, image=photo, bd=0, highlightthickness=0)
+                bg_label.image = photo  # Keep a reference
+                bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+            else:
+                # Fallback to gradient background if screen capture fails
+                self.blur_window.configure(bg='#1a1a1a')
+                
+        except Exception as e:
+            print(f"Error setting blurred background: {e}")
+            # Fallback to dark background
+            self.blur_window.configure(bg='#1a1a1a')
+        
+        # Get warning text from config
         if CONFIG_AVAILABLE:
-            warning_text = config.lock_message
+            warning_text = config.lock_message.replace('\\n', '\n')  # Handle escaped newlines
+            hotkey = config.unlock_hotkey
         else:
             warning_text = """🔒 UNAUTHORIZED ACCESS DETECTED 🔒
 
 SCREEN LOCKED FOR SECURITY
 
-This computer is protected by facial recognition security.
-Only the registered owner can unlock this screen.
+This computer uses advanced facial recognition security.
+Screen locks when multiple people or unauthorized persons are detected.
+
+SECURITY POLICY:
+✓ Owner alone: Screen unlocked
+✗ Multiple people: Screen locked (even with owner present)
+✗ Unauthorized person: Screen locked immediately
 
 Press Ctrl+Alt+O to enter unlock password
 
 ⚠️ All access attempts are being logged ⚠️"""
+            hotkey = 'ctrl+alt+o'
         
-        blur_label = tk.Label(self.blur_window, 
-                             text=warning_text, 
-                             fg='red', bg='black', 
-                             font=('Arial', 20, 'bold'),
-                             justify='center')
-        blur_label.pack(expand=True)
+        # Create modern text overlay with glassmorphism effect
+        text_frame = tk.Frame(self.blur_window, bg='#000000', bd=0, highlightthickness=0)
+        text_frame.configure(relief='flat')
+        text_frame.place(relx=0.5, rely=0.5, anchor='center')
+        
+        # Create the main text label with modern styling
+        text_label = tk.Label(text_frame, 
+                             text=warning_text,
+                             fg='#ffffff', 
+                             bg='#000000',
+                             font=('Segoe UI', 20, 'normal'),
+                             justify='center',
+                             wraplength=min(screen_width-200, 800),
+                             padx=40,
+                             pady=30,
+                             bd=0,
+                             highlightthickness=0)
+        text_label.pack()
+        
+        # Add subtle glow effect with multiple borders
+        glow_frame1 = tk.Frame(self.blur_window, bg='#ffffff', bd=0, highlightthickness=1, highlightcolor='#ffffff')
+        glow_frame1.place(relx=0.5, rely=0.5, anchor='center', 
+                         width=text_label.winfo_reqwidth()+85, 
+                         height=text_label.winfo_reqheight()+65)
+        glow_frame1.lower()
+        
+        glow_frame2 = tk.Frame(self.blur_window, bg='#cccccc', bd=0, highlightthickness=1, highlightcolor='#cccccc') 
+        glow_frame2.place(relx=0.5, rely=0.5, anchor='center',
+                         width=text_label.winfo_reqwidth()+90,
+                         height=text_label.winfo_reqheight()+70)
+        glow_frame2.lower()
         
         # Bind unlock hotkey
-        if CONFIG_AVAILABLE:
-            hotkey = config.unlock_hotkey
-        else:
-            hotkey = 'ctrl+alt+o'
         keyboard.add_hotkey(hotkey, self.request_unlock)
     
     def request_unlock(self):

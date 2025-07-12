@@ -16,9 +16,11 @@ I have successfully created a comprehensive Python facial recognition security s
    - Encrypted storage of face data and password hash
    - Dual authentication: face recognition + password unlock
 
-3. **🖥️ Screen Blurring Protection**
-   - Automatically blurs screen when unauthorized person detected
-   - Fullscreen overlay with security warning
+3. **🖥️ Enhanced Screen Protection with Real Blur**
+   - Captures actual screen content and applies sophisticated blur effect
+   - Glassmorphism design with semi-transparent overlay
+   - Configurable blur intensity and visual effects
+   - Fallback to black overlay if screen capture fails
    - Grace period (3 seconds) before activation
 
 4. **⌨️ Emergency Unlock**
@@ -39,6 +41,9 @@ blurscreen/
 ├── start.bat                     # 🏃 Windows startup script
 ├── test_system.py                # 🧪 System verification
 ├── test_camera.py                # 📹 Camera testing
+├── test_blur_effect.py           # 🌀 Blur effect testing
+├── test_enhanced_security.py     # 👥 Multi-person security test
+├── ENHANCEMENT_SUMMARY.md        # 📋 Recent improvements documentation
 ├── README.md                     # 📖 Technical documentation
 ├── USER_GUIDE.md                 # 👥 User instructions
 └── security.key                  # 🔑 Encryption key (auto-generated)
@@ -61,9 +66,11 @@ blurscreen/
 - **🎯 Accurate Detection**: MediaPipe AI for reliable face recognition
 - **🔒 Secure Storage**: Fernet encryption for all sensitive data
 - **⚡ Performance**: Optimized for real-time monitoring
-- **🎛️ Configurable**: Extensive customization options
+- **� Real Screen Blur**: Captures and blurs actual screen content for enhanced privacy
+- **�🎛️ Configurable**: Extensive customization options including blur effects
 - **🖥️ Cross-Platform**: Works on Windows with webcam
 - **📱 User-Friendly**: GUI launcher with status indicators
+- **👥 Multi-Person Security**: Advanced detection prevents unauthorized viewing
 
 ### 🧪 Tested & Verified
 
@@ -80,9 +87,10 @@ All components tested successfully:
 ### 🔧 Customization Options
 
 Edit `config.ini` to adjust:
-- **Security**: Grace period, detection sensitivity
+- **Security**: Grace period, detection sensitivity, multi-person detection
 - **Camera**: Resolution, FPS, device selection
 - **Display**: Monitor window, face rectangles
+- **Blur Effects**: Intensity, quality, overlay darkness, enable/disable
 - **Performance**: Processing delay, CPU usage
 - **Messages**: Custom lock screen text
 
