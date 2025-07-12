@@ -18,20 +18,39 @@ import win32ui
 from ctypes import windll
 import keyboard
 
+# Try to import configuration
+try:
+    from config_loader import config
+    CONFIG_AVAILABLE = True
+except ImportError:
+    CONFIG_AVAILABLE = False
+    print("Warning: config_loader not available, using default settings")
+
 class FaceSecuritySystem:
     def __init__(self):
         self.owner_face_encodings = []
         self.owner_name = "Owner"
-        self.config_file = "face_security_config.pkl"
-        self.key_file = "security.key"
+        
+        # Load configuration
+        if CONFIG_AVAILABLE:
+            self.config_file = config.basic_config_file
+            self.key_file = config.encryption_key_file
+            self.grace_period = config.grace_period
+            self.face_detection_interval = config.detection_interval
+            self.registration_samples = config.registration_samples
+        else:
+            self.config_file = "face_security_config.pkl"
+            self.key_file = "security.key"
+            self.grace_period = 3
+            self.face_detection_interval = 1.0
+            self.registration_samples = 5
+            
         self.is_monitoring = False
         self.screen_blurred = False
         self.camera = None
         self.blur_window = None
         self.blur_thread = None
-        self.face_detection_interval = 1.0  # Check every 1 second
         self.last_face_time = time.time()
-        self.grace_period = 3  # 3 seconds grace period before blurring
         self.owner_detected = True
         self.setup_encryption()
         
@@ -103,6 +122,8 @@ class FaceSecuritySystem:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f"Faces detected: {len(face_locations)}", (10, 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, f"Samples needed: {len(face_encodings)}/{self.registration_samples}", (10, 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             cv2.imshow('Owner Registration', frame)
             
@@ -110,9 +131,9 @@ class FaceSecuritySystem:
             if key == ord(' '):  # Space to capture
                 if len(current_encodings) == 1:
                     face_encodings.append(current_encodings[0])
-                    print(f"Face captured! Total samples: {len(face_encodings)}")
+                    print(f"Face captured! Total samples: {len(face_encodings)}/{self.registration_samples}")
                     
-                    if len(face_encodings) >= 5:  # Collect 5 samples
+                    if len(face_encodings) >= self.registration_samples:  # Use config value
                         break
                 else:
                     print("Please ensure exactly one face is visible")
@@ -124,7 +145,7 @@ class FaceSecuritySystem:
         cap.release()
         cv2.destroyAllWindows()
         
-        if len(face_encodings) >= 5:
+        if len(face_encodings) >= self.registration_samples:  # Use config value
             # Save the configuration
             config = {
                 'face_encodings': face_encodings,
@@ -138,10 +159,10 @@ class FaceSecuritySystem:
             with open(self.config_file, 'wb') as f:
                 f.write(encrypted_data)
             
-            print("Owner registration successful!")
+            print(f"Owner registration successful! Collected {len(face_encodings)} face samples.")
             return True
         else:
-            print("Registration failed - insufficient face samples")
+            print(f"Registration failed - need at least {self.registration_samples} face samples, got {len(face_encodings)}")
             return False
     
     def load_owner_data(self):
@@ -181,30 +202,120 @@ class FaceSecuritySystem:
             return False
     
     def detect_faces(self, frame):
-        """Detect and recognize faces in frame"""
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame)
-        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-        
-        owner_detected = False
-        unauthorized_face_detected = False
-        total_faces = len(face_locations)
-        recognized_faces = 0
-        
-        for face_encoding in face_encodings:
-            # Compare with owner's face encodings
-            matches = face_recognition.compare_faces(self.owner_face_encodings, face_encoding, tolerance=0.6)
+        """Enhanced face detection with preprocessing and better accuracy"""
+        try:
+            # Preprocess frame for better detection
+            # 1. Resize for faster processing while maintaining quality
+            original_frame = frame.copy()
+            height, width = frame.shape[:2]
             
-            if True in matches:
-                owner_detected = True
-                recognized_faces += 1
+            # Use higher resolution if available for better accuracy
+            if CONFIG_AVAILABLE:
+                detection_scale = 1.0 if min(width, height) >= 720 else 1.5
             else:
-                # This face is not the owner - unauthorized
-                unauthorized_face_detected = True
-        
-        face_detected = total_faces > 0
-        
-        return owner_detected, face_detected, unauthorized_face_detected, total_faces
+                detection_scale = 1.0
+            
+            if detection_scale != 1.0:
+                new_width = int(width * detection_scale)
+                new_height = int(height * detection_scale)
+                frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            
+            # 2. Enhance image quality
+            # Apply histogram equalization for better lighting
+            yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+            yuv[:,:,0] = cv2.equalizeHist(yuv[:,:,0])
+            frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+            
+            # 3. Apply slight Gaussian blur to reduce noise
+            frame = cv2.GaussianBlur(frame, (3, 3), 0.5)
+            
+            # Convert to RGB for face_recognition
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Use better face detection model
+            face_locations = face_recognition.face_locations(rgb_frame, model='hog')  # More accurate than default
+            
+            if not face_locations:
+                # Try with CNN model if HOG fails (slower but more accurate)
+                try:
+                    face_locations = face_recognition.face_locations(rgb_frame, model='cnn')
+                except:
+                    pass  # Fall back to no faces detected
+            
+            # Scale back face locations if we resized
+            if detection_scale != 1.0:
+                face_locations = [(int(top/detection_scale), int(right/detection_scale), 
+                                 int(bottom/detection_scale), int(left/detection_scale)) 
+                                for (top, right, bottom, left) in face_locations]
+            
+            # Extract face encodings with enhanced tolerance
+            face_encodings = face_recognition.face_encodings(cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB), 
+                                                           face_locations, num_jitters=2)  # More jitters for accuracy
+            
+            owner_detected = False
+            unauthorized_face_detected = False
+            total_faces = len(face_locations)
+            recognized_faces = 0
+            
+            # Enhanced face comparison with multiple tolerance levels
+            similarity_threshold = config.similarity_threshold if CONFIG_AVAILABLE else 0.8
+            
+            for i, face_encoding in enumerate(face_encodings):
+                is_owner = False
+                
+                # Try multiple tolerance levels for better accuracy
+                for tolerance in [0.5, 0.6, similarity_threshold]:
+                    matches = face_recognition.compare_faces(self.owner_face_encodings, face_encoding, tolerance=tolerance)
+                    
+                    if True in matches:
+                        # Calculate confidence using face distance
+                        face_distances = face_recognition.face_distance(self.owner_face_encodings, face_encoding)
+                        best_match_distance = min(face_distances)
+                        
+                        # Additional confidence check
+                        if best_match_distance < tolerance:
+                            owner_detected = True
+                            recognized_faces += 1
+                            is_owner = True
+                            break
+                
+                if not is_owner:
+                    unauthorized_face_detected = True
+            
+            face_detected = total_faces > 0
+            
+            return owner_detected, face_detected, unauthorized_face_detected, total_faces
+            
+        except Exception as e:
+            print(f"Error in enhanced face detection: {e}")
+            # Fallback to basic detection
+            return self._basic_face_detection(frame)
+    
+    def _basic_face_detection(self, frame):
+        """Fallback basic face detection method"""
+        try:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            face_locations = face_recognition.face_locations(rgb_frame)
+            face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+            
+            owner_detected = False
+            unauthorized_face_detected = False
+            total_faces = len(face_locations)
+            
+            for face_encoding in face_encodings:
+                matches = face_recognition.compare_faces(self.owner_face_encodings, face_encoding, tolerance=0.6)
+                
+                if True in matches:
+                    owner_detected = True
+                else:
+                    unauthorized_face_detected = True
+            
+            face_detected = total_faces > 0
+            return owner_detected, face_detected, unauthorized_face_detected, total_faces
+            
+        except Exception as e:
+            print(f"Error in basic face detection: {e}")
+            return False, False, False, 0
     
     def get_screen_size(self):
         """Get screen dimensions"""
@@ -351,37 +462,87 @@ Press Ctrl+Alt+O to enter unlock password
 ⚠️ All access attempts are being logged ⚠️"""
             hotkey = 'ctrl+alt+o'
         
-        # Create modern text overlay with glassmorphism effect
-        text_frame = tk.Frame(self.blur_window, bg='#000000', bd=0, highlightthickness=0)
-        text_frame.configure(relief='flat')
-        text_frame.place(relx=0.5, rely=0.5, anchor='center')
+        # Create modern glass overlay with enhanced design
+        text_frame = tk.Frame(self.blur_window)
+        text_frame.configure(bg='#000000', relief='flat', bd=0, highlightthickness=0)
+        text_frame.place(relx=0.5, rely=0.4, anchor='center')
         
-        # Create the main text label with modern styling
-        text_label = tk.Label(text_frame, 
-                             text=warning_text,
-                             fg='#ffffff', 
-                             bg='#000000',
-                             font=('Segoe UI', 20, 'normal'),
+        # Enhanced glassmorphism container with multiple layers
+        glass_container = tk.Frame(text_frame)
+        glass_container.configure(bg='#1a1a1a', relief='flat', bd=0, 
+                                 highlightthickness=2, highlightcolor='#3a3a3a')
+        glass_container.pack(padx=40, pady=30)
+        
+        # Add subtle glow effect layers
+        for i, (color, width, offset) in enumerate([
+            ('#ffffff', 1, 6),   # Bright inner glow
+            ('#cccccc', 1, 8),   # Medium glow  
+            ('#999999', 1, 10),  # Outer glow
+        ]):
+            glow_frame = tk.Frame(self.blur_window, bg=color, highlightthickness=0)
+            glow_frame.place(relx=0.5, rely=0.4, anchor='center',
+                           width=glass_container.winfo_reqwidth() + width * 20 + offset,
+                           height=glass_container.winfo_reqheight() + width * 15 + offset)
+            glow_frame.lower()
+        
+        # Main content with improved typography
+        content_frame = tk.Frame(glass_container, bg='#1a1a1a', bd=0)
+        content_frame.pack(padx=30, pady=25)
+        
+        # Header with icon
+        header_frame = tk.Frame(content_frame, bg='#1a1a1a')
+        header_frame.pack(fill='x', pady=(0, 15))
+        
+        header_label = tk.Label(header_frame,
+                               text="🔒 SECURITY ALERT",
+                               font=('Segoe UI', 24, 'bold'),
+                               fg='#ff4757',  # Bright red for attention
+                               bg='#1a1a1a',
+                               justify='center')
+        header_label.pack()
+        
+        # Subtitle
+        subtitle_label = tk.Label(content_frame,
+                                 text="UNAUTHORIZED ACCESS DETECTED",
+                                 font=('Segoe UI', 16, 'normal'),
+                                 fg='#ffa502',  # Orange for warning
+                                 bg='#1a1a1a',
+                                 justify='center')
+        subtitle_label.pack(pady=(0, 20))
+        
+        # Main message with better formatting
+        lines = warning_text.split('\n')[2:]  # Skip header lines we already displayed
+        main_text = '\n'.join(lines)
+        
+        text_label = tk.Label(content_frame,
+                             text=main_text,
+                             font=('Segoe UI', 14, 'normal'),
+                             fg='#ffffff',
+                             bg='#1a1a1a',
                              justify='center',
-                             wraplength=min(screen_width-200, 800),
-                             padx=40,
-                             pady=30,
-                             bd=0,
-                             highlightthickness=0)
-        text_label.pack()
+                             wraplength=min(screen_width-300, 700))
+        text_label.pack(pady=(0, 20))
         
-        # Add subtle glow effect with multiple borders
-        glow_frame1 = tk.Frame(self.blur_window, bg='#ffffff', bd=0, highlightthickness=1, highlightcolor='#ffffff')
-        glow_frame1.place(relx=0.5, rely=0.5, anchor='center', 
-                         width=text_label.winfo_reqwidth()+85, 
-                         height=text_label.winfo_reqheight()+65)
-        glow_frame1.lower()
+        # Action button style
+        action_frame = tk.Frame(content_frame, bg='#1a1a1a')
+        action_frame.pack(fill='x', pady=(10, 0))
         
-        glow_frame2 = tk.Frame(self.blur_window, bg='#cccccc', bd=0, highlightthickness=1, highlightcolor='#cccccc') 
-        glow_frame2.place(relx=0.5, rely=0.5, anchor='center',
-                         width=text_label.winfo_reqwidth()+90,
-                         height=text_label.winfo_reqheight()+70)
-        glow_frame2.lower()
+        action_label = tk.Label(action_frame,
+                               text=f"Press {hotkey.upper()} to unlock",
+                               font=('Segoe UI', 16, 'bold'),
+                               fg='#2ed573',  # Green for action
+                               bg='#1a1a1a',
+                               justify='center')
+        action_label.pack()
+        
+        # Monitoring notice
+        notice_label = tk.Label(content_frame,
+                               text="⚠️ This session is being monitored and logged ⚠️",
+                               font=('Segoe UI', 12, 'italic'),
+                               fg='#747d8c',  # Gray for notice
+                               bg='#1a1a1a',
+                               justify='center')
+        notice_label.pack(pady=(15, 0))
         
         # Bind unlock hotkey
         keyboard.add_hotkey(hotkey, self.request_unlock)
@@ -412,19 +573,46 @@ Press Ctrl+Alt+O to enter unlock password
         self.screen_blurred = False
     
     def monitor_faces(self):
-        """Main monitoring loop"""
-        print("Starting face monitoring...")
-        self.camera = cv2.VideoCapture(0)
+        """Enhanced monitoring loop with better performance and config integration"""
+        print("🚀 Starting enhanced face monitoring...")
         
+        # Initialize camera with config values
+        camera_index = config.camera_index if CONFIG_AVAILABLE else 0
+        camera_width = config.camera_width if CONFIG_AVAILABLE else 1280
+        camera_height = config.camera_height if CONFIG_AVAILABLE else 720
+        camera_fps = config.camera_fps if CONFIG_AVAILABLE else 30
+        
+        self.camera = cv2.VideoCapture(camera_index)
         if not self.camera.isOpened():
-            print("Error: Could not open camera")
+            print("❌ Error: Could not open camera")
             return
+        
+        # Configure camera with enhanced settings
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, camera_width)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_height)
+        self.camera.set(cv2.CAP_PROP_FPS, camera_fps)
+        self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Enable auto exposure
+        self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 0.5)      # Balanced brightness
+        
+        print(f"📹 Camera initialized: {camera_width}x{camera_height} @ {camera_fps}fps")
+        
+        # Setup keyboard listener for hotkey unlock
+        hotkey = config.unlock_hotkey if CONFIG_AVAILABLE else 'ctrl+alt+o'
+        keyboard.add_hotkey(hotkey, self.request_unlock)
+        print(f"⌨️  Hotkey registered: {hotkey}")
+        print("✅ Enhanced monitoring started!")
+        
+        frame_count = 0
+        start_time = time.time()
         
         while self.is_monitoring:
             ret, frame = self.camera.read()
             if not ret:
-                print("Error: Could not read frame")
+                print("❌ Error: Could not read frame")
                 break
+            
+            frame_count += 1
+            current_fps = frame_count / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
             
             try:
                 owner_detected, face_detected, unauthorized_face_detected, total_faces = self.detect_faces(frame)
@@ -463,31 +651,59 @@ Press Ctrl+Alt+O to enter unlock password
                         self.create_blur_overlay()
                         self.screen_blurred = True
                 
-                # Optional: Display monitoring window (comment out for stealth mode)
-                if not self.screen_blurred:
-                    # Enhanced status display
-                    if unauthorized_face_detected:
-                        status_text = f"SECURITY ALERT: {total_faces} faces ({('Owner + ' if owner_detected else '') + str(total_faces - (1 if owner_detected else 0)) + ' unauthorized'})"
-                        status_color = (0, 0, 255)  # Red
-                    elif owner_detected and total_faces == 1:
-                        status_text = "Authorized (Owner Only)"
-                        status_color = (0, 255, 0)  # Green
-                    elif not face_detected:
-                        status_text = "No faces detected"
-                        status_color = (255, 255, 0)  # Yellow
-                    else:
-                        status_text = "Monitoring..."
-                        status_color = (255, 255, 255)  # White
+                # Enhanced monitoring display with better configuration support
+                if CONFIG_AVAILABLE and config.show_monitor_window:
+                    # Enhanced status display with modern styling
+                    status_bg_height = 140
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (frame.shape[1], status_bg_height), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
                     
-                    cv2.putText(frame, status_text, (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
-                    cv2.putText(frame, f"Total Faces: {total_faces}", (10, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                    cv2.putText(frame, f"Owner Present: {'Yes' if owner_detected else 'No'}", (10, 90), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if owner_detected else (255, 255, 255), 2)
-                    cv2.putText(frame, f"Unauthorized: {'Yes' if unauthorized_face_detected else 'No'}", (10, 120), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if unauthorized_face_detected else (255, 255, 255), 2)
-                    cv2.imshow('Face Security Monitor', frame)
+                    if unauthorized_face_detected:
+                        status_text = f"🚨 SECURITY ALERT: {total_faces} faces detected"
+                        status_color = (0, 0, 255)  # Red
+                        if owner_detected:
+                            detail_text = f"Owner + {total_faces - 1} unauthorized person(s)"
+                        else:
+                            detail_text = f"{total_faces} unauthorized person(s)"
+                    elif owner_detected and total_faces == 1:
+                        status_text = "✅ SECURE: Owner authenticated"
+                        status_color = (0, 255, 0)  # Green
+                        detail_text = "Screen unlocked - single authorized user"
+                    elif total_faces > 1:
+                        status_text = "🔒 PRIVACY MODE: Multiple people"
+                        status_color = (0, 255, 255)  # Yellow
+                        detail_text = f"{total_faces} people detected - screen locked for privacy"
+                    elif total_faces == 0:
+                        status_text = "👀 MONITORING: No faces detected"
+                        status_color = (255, 255, 0)  # Cyan
+                        detail_text = "Scanning for faces..."
+                    else:
+                        status_text = "🔍 MONITORING: Analyzing..."
+                        status_color = (255, 255, 255)  # White
+                        detail_text = "Processing face data..."
+                    
+                    # Main status
+                    cv2.putText(frame, status_text, (15, 35), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+                    
+                    # Detail text
+                    cv2.putText(frame, detail_text, (15, 65), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Stats line 1
+                    stats_text1 = f"Faces: {total_faces} | Screen: {'🔒 LOCKED' if self.screen_blurred else '🔓 UNLOCKED'}"
+                    cv2.putText(frame, stats_text1, (15, 95), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                    
+                    # Stats line 2
+                    stats_text2 = f"FPS: {current_fps:.1f} | Resolution: {frame.shape[1]}x{frame.shape[0]} | Enhanced Mode"
+                    cv2.putText(frame, stats_text2, (15, 115), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                    
+                    # Show enhanced monitoring window
+                    window_title = config.monitor_window_title if CONFIG_AVAILABLE else 'Enhanced Face Security Monitor'
+                    cv2.imshow(window_title, frame)
                 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break

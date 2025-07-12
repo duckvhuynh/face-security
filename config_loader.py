@@ -51,6 +51,13 @@ class Config:
             'DETECTION_INTERVAL': '1.0'
         }
         
+        self.config['Blur_Effect'] = {
+            'ENABLE_SCREEN_BLUR': 'True',
+            'BLUR_INTENSITY': '15',
+            'BLUR_QUALITY_REDUCTION': '4',
+            'BLUR_OVERLAY_DARKNESS': '100'
+        }
+        
         # Load from file if it exists
         if os.path.exists(self.config_file):
             try:
@@ -96,9 +103,15 @@ class Config:
             return False
     
     def get_string(self, section, key):
-        """Get string value from config"""
+        """Get string value from config with quote removal"""
         try:
-            return self.config.get(section, key)
+            value = self.config.get(section, key)
+            # Remove surrounding quotes if present
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            elif value.startswith("'") and value.endswith("'"):
+                value = value[1:-1]
+            return value
         except:
             return ""
     
@@ -149,7 +162,10 @@ class Config:
     
     @property
     def lock_message(self):
-        return self.get_string('Security_Messages', 'LOCK_MESSAGE')
+        """Get lock message with proper newline handling"""
+        message = self.get_string('Security_Messages', 'LOCK_MESSAGE')
+        # Handle escaped newlines
+        return message.replace('\\n', '\n')
     
     @property
     def unlock_hotkey(self):

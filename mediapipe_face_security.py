@@ -41,6 +41,7 @@ class MediaPipeFaceSecuritySystem:
             self.grace_period = config.grace_period
             self.face_detection_interval = config.detection_interval
             self.similarity_threshold = config.similarity_threshold
+            self.registration_samples = config.registration_samples  # Use config value
         else:
             detection_confidence = 0.7
             self.config_file = "mediapipe_security_config.pkl"
@@ -48,6 +49,7 @@ class MediaPipeFaceSecuritySystem:
             self.grace_period = 3
             self.face_detection_interval = 1.0
             self.similarity_threshold = 0.8
+            self.registration_samples = 5  # Fallback value
         
         self.face_detection = self.mp_face_detection.FaceDetection(
             model_selection=1, min_detection_confidence=detection_confidence)
@@ -195,7 +197,7 @@ class MediaPipeFaceSecuritySystem:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f"Faces detected: {face_count}", (10, 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Samples collected: {len(face_features)}/5", (10, 90), 
+            cv2.putText(frame, f"Samples collected: {len(face_features)}/{self.registration_samples}", (10, 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             cv2.imshow('Owner Registration', frame)
@@ -207,7 +209,7 @@ class MediaPipeFaceSecuritySystem:
                     face_features.append(current_features[0])
                     print(f"Face captured! Total samples: {len(face_features)}")
                     
-                    if len(face_features) >= 5:  # Collect 5 samples
+                    if len(face_features) >= self.registration_samples:  # Use config value
                         break
                 else:
                     print("Please ensure exactly one face is visible")
@@ -219,7 +221,7 @@ class MediaPipeFaceSecuritySystem:
         cap.release()
         cv2.destroyAllWindows()
         
-        if len(face_features) >= 5:
+        if len(face_features) >= self.registration_samples:
             # Save the configuration
             config = {
                 'face_features': face_features,
@@ -276,44 +278,105 @@ class MediaPipeFaceSecuritySystem:
             return False
     
     def compare_faces(self, features1, features2, threshold=None):
-        """Compare two face feature sets using cosine similarity"""
+        """Enhanced face comparison using multiple metrics for better accuracy"""
         try:
             if threshold is None:
                 threshold = self.similarity_threshold
-            similarity = cosine_similarity([features1], [features2])[0][0]
-            return similarity > threshold
-        except:
+            
+            # Convert to numpy arrays if needed
+            if not isinstance(features1, np.ndarray):
+                features1 = np.array(features1)
+            if not isinstance(features2, np.ndarray):
+                features2 = np.array(features2)
+            
+            # Normalize features for better comparison
+            features1_norm = features1 / np.linalg.norm(features1)
+            features2_norm = features2 / np.linalg.norm(features2)
+            
+            # Use multiple similarity metrics for robust comparison
+            # 1. Cosine similarity
+            cosine_sim = cosine_similarity([features1_norm], [features2_norm])[0][0]
+            
+            # 2. Euclidean distance (converted to similarity)
+            euclidean_dist = np.linalg.norm(features1_norm - features2_norm)
+            euclidean_sim = 1 / (1 + euclidean_dist)
+            
+            # 3. Dot product similarity
+            dot_sim = np.dot(features1_norm, features2_norm)
+            
+            # Weighted combination of similarities
+            combined_similarity = (cosine_sim * 0.5) + (euclidean_sim * 0.3) + (dot_sim * 0.2)
+            
+            # Adaptive threshold based on feature quality
+            feature_quality = min(np.std(features1), np.std(features2))
+            adaptive_threshold = threshold * (0.8 + 0.2 * min(feature_quality, 1.0))
+            
+            return combined_similarity > adaptive_threshold
+            
+        except Exception as e:
+            print(f"Error in face comparison: {e}")
             return False
     
     def detect_faces(self, frame):
-        """Detect and recognize faces in frame"""
-        current_features = self.extract_face_features(frame)
-        
-        owner_detected = False
-        unauthorized_face_detected = False
-        total_faces = len(current_features)
-        
-        # Track which faces are recognized as owner
-        recognized_faces = 0
-        
-        for features in current_features:
-            is_owner = False
-            # Compare with owner's face features
-            for owner_features in self.owner_face_features:
-                if self.compare_faces(features, owner_features):
-                    is_owner = True
-                    owner_detected = True
-                    recognized_faces += 1
-                    break
+        """Enhanced face detection with preprocessing and quality checks"""
+        try:
+            # Preprocess frame for better detection
+            # 1. Enhance contrast and brightness
+            enhanced_frame = cv2.convertScaleAbs(frame, alpha=1.2, beta=10)
             
-            # If this face is not the owner, it's unauthorized
-            if not is_owner and total_faces > 0:
-                unauthorized_face_detected = True
-        
-        # Security logic: Lock if unauthorized faces detected, regardless of owner presence
-        face_detected = total_faces > 0
-        
-        return owner_detected, face_detected, unauthorized_face_detected, total_faces
+            # 2. Apply noise reduction
+            denoised_frame = cv2.bilateralFilter(enhanced_frame, 9, 75, 75)
+            
+            # 3. Extract face features from enhanced frame
+            current_features = self.extract_face_features(denoised_frame)
+            
+            owner_detected = False
+            unauthorized_face_detected = False
+            total_faces = len(current_features)
+            
+            # Track which faces are recognized as owner
+            recognized_faces = 0
+            face_confidence_scores = []
+            
+            for features in current_features:
+                is_owner = False
+                best_match_score = 0
+                
+                # Compare with owner's face features using multiple samples
+                for owner_features in self.owner_face_features:
+                    if self.compare_faces(features, owner_features):
+                        is_owner = True
+                        owner_detected = True
+                        recognized_faces += 1
+                        
+                        # Calculate confidence score for this match
+                        features_norm = features / np.linalg.norm(features)
+                        owner_norm = owner_features / np.linalg.norm(owner_features)
+                        match_score = cosine_similarity([features_norm], [owner_norm])[0][0]
+                        best_match_score = max(best_match_score, match_score)
+                        break
+                
+                face_confidence_scores.append(best_match_score)
+                
+                # If this face is not the owner, it's unauthorized
+                if not is_owner and total_faces > 0:
+                    unauthorized_face_detected = True
+            
+            # Additional security check: verify owner confidence
+            if owner_detected and face_confidence_scores:
+                avg_confidence = np.mean([score for score in face_confidence_scores if score > 0])
+                if avg_confidence < self.similarity_threshold * 0.9:  # High confidence required
+                    print(f"⚠️  Owner detection confidence low ({avg_confidence:.2f}) - treating as unauthorized")
+                    owner_detected = False
+                    unauthorized_face_detected = True
+            
+            face_detected = total_faces > 0
+            
+            return owner_detected, face_detected, unauthorized_face_detected, total_faces
+            
+        except Exception as e:
+            print(f"Error in face detection: {e}")
+            return False, False, True, 0  # Fail-safe: assume unauthorized on error
     
     def get_screen_size(self):
         """Get screen dimensions"""
@@ -450,52 +513,82 @@ class MediaPipeFaceSecuritySystem:
         else:
             warning_text = """🔒 UNAUTHORIZED ACCESS DETECTED 🔒
 
-SCREEN LOCKED FOR SECURITY
+ADVANCED FACIAL RECOGNITION SECURITY
 
-This computer uses advanced facial recognition security.
-Screen locks when multiple people or unauthorized persons are detected.
+This computer is protected by AI-powered face recognition.
+Access is restricted to authorized personnel only.
 
-SECURITY POLICY:
-✓ Owner alone: Screen unlocked
-✗ Multiple people: Screen locked (even with owner present)
-✗ Unauthorized person: Screen locked immediately
+SECURITY STATUS:
+⚠️  Unauthorized person(s) detected
+🔒 Screen automatically locked
+🛡️  All access attempts are logged
 
 Press Ctrl+Alt+O to enter unlock password
 
-⚠️ All access attempts are being logged ⚠️"""
+For assistance, contact system administrator"""
             hotkey = 'ctrl+alt+o'
         
-        # Create modern text overlay with glassmorphism effect
-        text_frame = tk.Frame(self.blur_window, bg='#000000', bd=0, highlightthickness=0)
-        text_frame.configure(relief='flat')
-        text_frame.place(relx=0.5, rely=0.5, anchor='center')
+        # Create modern glassmorphism overlay with gradient background
+        overlay_frame = tk.Frame(self.blur_window, bg='#1a1a2e', bd=0, highlightthickness=0)
+        overlay_frame.place(relx=0.5, rely=0.5, anchor='center', 
+                           width=min(screen_width-100, 900), 
+                           height=min(screen_height-100, 600))
         
-        # Create the main text label with modern styling
-        text_label = tk.Label(text_frame, 
-                             text=warning_text,
-                             fg='#ffffff', 
-                             bg='#000000',
-                             font=('Segoe UI', 20, 'normal'),
-                             justify='center',
-                             wraplength=min(screen_width-200, 800),
-                             padx=40,
-                             pady=30,
-                             bd=0,
-                             highlightthickness=0)
-        text_label.pack()
+        # Add subtle gradient effect using Canvas
+        canvas = tk.Canvas(overlay_frame, 
+                          width=min(screen_width-100, 900), 
+                          height=min(screen_height-100, 600),
+                          bg='#1a1a2e', highlightthickness=0, bd=0)
+        canvas.pack(fill='both', expand=True)
         
-        # Add subtle glow effect with multiple borders
-        glow_frame1 = tk.Frame(self.blur_window, bg='#ffffff', bd=0, highlightthickness=1, highlightcolor='#ffffff')
-        glow_frame1.place(relx=0.5, rely=0.5, anchor='center', 
-                         width=text_label.winfo_reqwidth()+85, 
-                         height=text_label.winfo_reqheight()+65)
-        glow_frame1.lower()
+        # Create gradient background on canvas
+        for i in range(0, min(screen_height-100, 600), 5):
+            alpha = int(255 * (i / min(screen_height-100, 600)))
+            color = f"#{alpha:02x}{alpha//4:02x}{alpha//2:02x}"
+            canvas.create_rectangle(0, i, min(screen_width-100, 900), i+5, 
+                                  fill=color, outline=color)
         
-        glow_frame2 = tk.Frame(self.blur_window, bg='#cccccc', bd=0, highlightthickness=1, highlightcolor='#cccccc') 
-        glow_frame2.place(relx=0.5, rely=0.5, anchor='center',
-                         width=text_label.winfo_reqwidth()+90,
-                         height=text_label.winfo_reqheight()+70)
-        glow_frame2.lower()
+        # Add security icon
+        canvas.create_text(min(screen_width-100, 900)//2, 80, 
+                          text="🛡️", font=('Segoe UI Emoji', 48), 
+                          fill='#00d4ff', anchor='center')
+        
+        # Add main title
+        canvas.create_text(min(screen_width-100, 900)//2, 150, 
+                          text="SECURITY LOCKDOWN", 
+                          font=('Segoe UI', 28, 'bold'), 
+                          fill='#ffffff', anchor='center')
+        
+        # Add subtitle
+        canvas.create_text(min(screen_width-100, 900)//2, 190, 
+                          text="AI Face Recognition Protection Active", 
+                          font=('Segoe UI', 14), 
+                          fill='#00d4ff', anchor='center')
+        
+        # Split warning text into lines and display
+        lines = warning_text.split('\n')
+        y_start = 250
+        for i, line in enumerate(lines):
+            if line.strip():  # Skip empty lines
+                font_size = 16 if '🔒' in line or '⚠️' in line else 14
+                font_weight = 'bold' if '🔒' in line or '⚠️' in line else 'normal'
+                color = '#ff6b6b' if '⚠️' in line else '#ffffff'
+                
+                canvas.create_text(min(screen_width-100, 900)//2, y_start + i*25, 
+                                  text=line, 
+                                  font=('Segoe UI', font_size, font_weight), 
+                                  fill=color, anchor='center')
+        
+        # Add pulsing border effect
+        border_color = '#00d4ff'
+        canvas.create_rectangle(5, 5, min(screen_width-100, 900)-5, min(screen_height-100, 600)-5, 
+                              outline=border_color, width=3, fill='')
+        
+        # Add unlock instruction at bottom
+        canvas.create_text(min(screen_width-100, 900)//2, min(screen_height-100, 600)-50, 
+                          text=f"Press {hotkey.upper()} to unlock", 
+                          font=('Segoe UI', 16, 'bold'), 
+                          fill='#00ff88', anchor='center')
         
         # Bind unlock hotkey
         keyboard.add_hotkey(hotkey, self.request_unlock)
@@ -573,14 +666,14 @@ Press Ctrl+Alt+O to enter unlock password
                 # Store current features for display purposes
                 current_features = self.extract_face_features(frame)
                 
-                # Enhanced security logic
+                # Enhanced security logic - Lock screen whenever ANY unauthorized face is detected
                 if unauthorized_face_detected:
-                    # Lock screen if ANY unauthorized face is detected, even with owner present
+                    # Immediate lock when ANY unauthorized face is detected
                     if not self.screen_blurred:
-                        if owner_detected:
-                            print(f"SECURITY ALERT: Owner present but {total_faces - 1} unauthorized face(s) detected - locking screen")
-                        else:
-                            print(f"Unknown person(s) detected ({total_faces} faces) - locking screen")
+                        if owner_detected and total_faces > 1:
+                            print(f"🚨 SECURITY ALERT: Owner present with {total_faces - 1} unauthorized person(s) - LOCKING SCREEN")
+                        elif not owner_detected:
+                            print(f"🚨 UNAUTHORIZED ACCESS: {total_faces} unknown person(s) detected - LOCKING SCREEN")
                         self.create_blur_overlay()
                         self.screen_blurred = True
                 elif owner_detected and not unauthorized_face_detected and total_faces == 1:
@@ -589,22 +682,15 @@ Press Ctrl+Alt+O to enter unlock password
                     self.owner_detected = True
                     if self.screen_blurred:
                         self.remove_blur_overlay()
-                        print("Owner detected alone - screen unlocked")
-                elif owner_detected and total_faces > 1:
-                    # Owner is present but with other faces - keep locked
-                    if not self.screen_blurred:
-                        print(f"Owner present with {total_faces - 1} other person(s) - maintaining lock")
-                        self.create_blur_overlay()
-                        self.screen_blurred = True
+                        print("✅ Owner verified alone - screen unlocked")
+                        self.screen_blurred = False
                 elif not face_detected:
-                    # No face detected - update timer but don't unlock yet
+                    # No face detected - grace period before action
+                    if current_time - self.last_face_time > self.grace_period and not self.screen_blurred:
+                        print("⚠️  No authorized user detected - maintaining current state")
+                else:
+                    # Other scenarios - maintain current state
                     self.last_face_time = current_time
-                elif face_detected and not owner_detected:
-                    # Only unauthorized faces detected
-                    if not self.screen_blurred and (current_time - self.last_face_time > self.grace_period):
-                        print(f"Only unauthorized person(s) detected ({total_faces} faces) - locking screen")
-                        self.create_blur_overlay()
-                        self.screen_blurred = True
                 
                 # Optional: Display monitoring window (comment out for stealth mode)
                 if not self.screen_blurred and show_monitor:
